@@ -312,7 +312,7 @@ def baseline():
 def post_train_static_quant():
     saved_model_dir = '../data/'
     float_model_file = 'mobilenet_v2-b0353104.pth'
-    scripted_quantized_model_file = 'mobilenet_quantization_scripted_quantized.pth'
+    scripted_quantized_model_file = 'mobilenet_quantization_scripted.pth'
 
     num_calibration_batches = 32
 
@@ -386,7 +386,6 @@ def quant_aware_train():
           qat_model.features[1].conv)
 
     device = 'cpu'
-    qat_model = qat_model.to(device)
 
     data_loader = prepare_data_loader_train()
     data_loader_test = prepare_data_loader_test()
@@ -411,35 +410,42 @@ def quant_aware_train():
         quantized_model = torch.ao.quantization.convert(qat_model.eval(), inplace=False)
         quantized_model.eval()
         top1, top5 = evaluate(quantized_model, criterion, data_loader_test, neval_batches=num_eval_batches, dev=device)
-        print('Epoch %d :Evaluation accuracy on %d images, %2.2f' % (
+        print('\nEpoch %d :Evaluation accuracy on %d images, %2.2f' % (
         nepoch, num_eval_batches * eval_batch_size, top1.avg))
 
     torch.jit.save(torch.jit.script(quantized_model), saved_model_dir + 'mobilenet_qat_scripted.pth')
 
 def check_scripted_quantized_model():
-    path_model = '../data/mobilenet_quantization_scripted_quantized.pth'
+    #path_model = '../data/mobilenet_quantization_scripted.pth' # top-1: 67.33
+    path_model = '../data/mobilenet_qat_scripted.pth'  #top-1: 67.01, top-5: 87.50
+
     model_scripted = torch.jit.load(path_model)
     model_scripted = model_scripted.to('cpu')
     model_scripted = model_scripted.eval()
 
     data_loader = prepare_data_loader_test()
     dev = 'cpu'
+    top1 = AverageMeter('Acc@1', ':6.2f')
+    top5 = AverageMeter('Acc@5', ':6.2f')
     cnt = 0
-
+    end = -1
     with torch.no_grad():
         for i, (image, target) in enumerate(data_loader):
             image, target = image.to(dev), target.to(dev)
             output = model_scripted(image)
-            _, pred = output.topk(k=1, dim=1, largest=True, sorted=True)
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
-            correct = pred.eq(target.view(-1, 1))
-            print('correct: ', torch.sum(correct).item(), ' / ', target.size(0))
+            top1.update(acc1[0], image.size(0))
+            top5.update(acc5[0], image.size(0))
+
             cnt += 1
-            if cnt >= 10:
+            if end != -1 and cnt >= end:
                 break
+
+    print(f'\nEvaluation accuracy top-1: {top1.avg:.2f}, top-5: {top5.avg:.2f}')
 
 if __name__ == '__main__':
     #baseline()
     #post_train_static_quant()
-    #check_scripted_quantized_model()
-    quant_aware_train()
+    check_scripted_quantized_model()
+    #quant_aware_train()
