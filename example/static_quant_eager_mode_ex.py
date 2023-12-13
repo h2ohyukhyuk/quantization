@@ -2,20 +2,15 @@
 (BETA) STATIC QUANTIZATION WITH EAGER MODE IN PYTORCH
 https://pytorch.org/tutorials/advanced/static_quantization_tutorial.html
 '''
-import os
-import sys
-import time
-import numpy as np
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import torchvision
-from torchvision import datasets
 import torchvision.transforms as transforms
 
-from example.utils import _make_divisible, ConvBNReLU, InvertedResidual, AverageMeter, accuracy, print_size_of_model
+from example.utils import _make_divisible, ConvBNReLU, InvertedResidual
+from example.utils import print_size_of_model, evaluate, train_one_epoch
 
 # Set up warnings
 import warnings
@@ -123,30 +118,6 @@ class MobileNetV2(nn.Module):
                     if type(m.conv[idx]) == nn.Conv2d:
                         fuse_modules(m.conv, [str(idx), str(idx + 1)], inplace=True)
 
-
-def evaluate(model, criterion, data_loader, neval_batches, dev):
-    model.eval()
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
-    cnt = 0
-    with torch.no_grad():
-        for i, (image, target) in enumerate(data_loader):
-            image, target = image.to(dev), target.to(dev)
-            output = model(image)
-            loss = criterion(output, target)
-            cnt += 1
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            print(f'{i}.', end = '')
-            if i % 41 == 0:
-                print('\n')
-            top1.update(acc1[0], image.size(0))
-            top5.update(acc5[0], image.size(0))
-            if cnt >= neval_batches:
-                 return top1, top5
-
-    print('\n')
-    return top1, top5
-
 def load_model(model_file):
     model = MobileNetV2()
     state_dict = torch.load(model_file)
@@ -154,47 +125,13 @@ def load_model(model_file):
     model.to('cpu')
     return model
 
-def prepare_data_loaders(data_path):
-    # ILSVRC2012_devkit_t12.tar.gz
-    train_batch_size = 30
-    eval_batch_size = 50
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-    dataset = torchvision.datasets.ImageNet(
-        data_path, split="train", transform=transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]))
-    dataset_test = torchvision.datasets.ImageNet(
-        data_path, split="val", transform=transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ]))
 
-    train_sampler = torch.utils.data.RandomSampler(dataset)
-    test_sampler = torch.utils.data.SequentialSampler(dataset_test)
-
-    data_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=train_batch_size,
-        sampler=train_sampler)
-
-    data_loader_test = torch.utils.data.DataLoader(
-        dataset_test, batch_size=eval_batch_size,
-        sampler=test_sampler)
-
-    return data_loader, data_loader_test
-
-def prepare_data_loader_train():
+def prepare_data_loader_train(data_path_train = 'D:/ImageNet1K/train'):
     # ILSVRC2012_devkit_t12.tar.gz
     train_batch_size = 30
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    data_path_train = 'D:/ImageNet1K/train'
     transform_train = transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
@@ -212,13 +149,11 @@ def prepare_data_loader_train():
 
     return data_loader
 
-def prepare_data_loader_test():
+def prepare_data_loader_test(eval_batch_size = 50, data_path_test = 'D:/ImageNet1K/val'):
     # ILSVRC2012_devkit_t12.tar.gz
-    eval_batch_size = 50
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    data_path_test = 'D:/ImageNet1K/val'
     transform_test = transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),
@@ -235,51 +170,19 @@ def prepare_data_loader_test():
 
     return data_loader_test
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, ntrain_batches):
-    model.train()
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
-    avgloss = AverageMeter('Loss', '1.5f')
-
-    cnt = 0
-    for image, target in data_loader:
-        start_time = time.time()
-        print('.', end = '')
-        cnt += 1
-        image, target = image.to(device), target.to(device)
-        output = model(image)
-        loss = criterion(output, target)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        top1.update(acc1[0], image.size(0))
-        top5.update(acc5[0], image.size(0))
-        avgloss.update(loss, image.size(0))
-        if cnt >= ntrain_batches:
-            print('Loss', avgloss.avg)
-
-            print('Training: * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
-                  .format(top1=top1, top5=top5))
-            return
-
-    print('Full imagenet train set:  * Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f}'
-          .format(top1=top1, top5=top5))
-    return
-
 
 def baseline():
 
     saved_model_dir = '../data/'
     float_model_file = 'mobilenet_v2-b0353104.pth'
-    scripted_float_model_file = 'mobilenet_float_scripted.pth'
+    scripted_float_model_file = 'mobilenet_v2_float_scripted.pth'
 
-    train_batch_size = 30
+    dev = 'cpu'
     eval_batch_size = 50
+    num_eval_batches = 1000
 
-    data_loader_test = prepare_data_loader_test()
-    criterion = nn.CrossEntropyLoss()
-    float_model = load_model(saved_model_dir + float_model_file).to('cpu')
+    data_loader_test = prepare_data_loader_test(eval_batch_size)
+    float_model = load_model(saved_model_dir + float_model_file).to(dev)
 
     # Next, we'll "fuse modules"; this can both make the model faster by saving on memory access
     # while also improving numerical accuracy. While this can be used with any model, this is
@@ -294,87 +197,112 @@ def baseline():
     # Note fusion of Conv+BN+Relu and Conv+Relu
     print('\n Inverted Residual Block: After fusion\n\n', float_model.features[1].conv)
 
-    num_eval_batches = 1000
-
     print("Size of baseline model")
     print_size_of_model(float_model)
 
-    dev = device = 'cuda' if torch.cuda.is_available() else 'cpu'
     float_model.to(dev)
-    top1, top5 = evaluate(float_model, criterion, data_loader_test, neval_batches=num_eval_batches, dev=dev)
-    print('Evaluation accuracy on %d images, %2.2f' % (num_eval_batches * eval_batch_size, top1.avg))
-    # Evaluation accuracy on 50000 images, 71.86
+    top1, top5 = evaluate(float_model, data_loader_test, neval_batches=num_eval_batches, dev=dev)
 
+    print('Evaluation accuracy on %d images, top-1: %2.2f top-5: %2.2f' % (num_eval_batches * eval_batch_size, top1.avg, top5.avg))
+    #Evaluation accuracy on 50000 images, 71.86 90.24
 
-    torch.jit.save(torch.jit.script(float_model), saved_model_dir + scripted_float_model_file)
-
+    script_model = torch.jit.script(float_model)
+    script_model.save(saved_model_dir + scripted_float_model_file)
 
 def post_train_static_quant():
     saved_model_dir = '../data/'
     float_model_file = 'mobilenet_v2-b0353104.pth'
-    scripted_quantized_model_file = 'mobilenet_quantization_scripted.pth'
+    scripted_quantized_model_file = 'mobilenet_v2_quant_scripted.pth'
 
     num_calibration_batches = 32
-
     data_loader_train = prepare_data_loader_train()
-    data_loader_test = prepare_data_loader_test()
-    criterion = nn.CrossEntropyLoss()
 
-    myModel = load_model(saved_model_dir + float_model_file).to('cpu')
-    myModel.eval()
-
-    # Fuse Conv, bn and relu
-    myModel.fuse_model()
+    print('Post trining Quantization')
+    path_float_model = saved_model_dir + float_model_file
+    float_model = load_model(path_float_model).to('cpu')
+    float_model.eval()
+    float_model.fuse_model()
 
     # Specify quantization configuration
     # Start with simple min/max range estimation and per-tensor quantization of weights
-    myModel.qconfig = torch.ao.quantization.default_qconfig
-    print('myModel.qconfig')
-    print(myModel.qconfig)
-    torch.ao.quantization.prepare(myModel, inplace=True)
+    float_model.qconfig = torch.ao.quantization.default_qconfig
+    print('qconfig -------')
+    print(float_model.qconfig)
+    torch.ao.quantization.prepare(float_model, inplace=True)
 
-    # Calibrate first
-    print('Post Training Quantization Prepare: Inserting Observers')
-    print('\n Inverted Residual Block:After observer insertion \n\n', myModel.features[1].conv)
+    print('\n Inverted Residual Block:After observer insertion \n\n', float_model.features[1].conv)
 
     # Calibrate with the training set
-    evaluate(myModel, criterion, data_loader_train, neval_batches=num_calibration_batches, dev='cpu')
+    print('start calibration')
+    evaluate(float_model, data_loader_train, neval_batches=num_calibration_batches, dev='cpu')
     print('Post Training Quantization: Calibration done')
 
     # Convert to quantized model
-    torch.ao.quantization.convert(myModel, inplace=True)
+    quant_model = torch.ao.quantization.convert(float_model)
     print('Post Training Quantization: Convert done')
     print('\n Inverted Residual Block: After fusion and quantization, note fused modules: \n\n',
-          myModel.features[1].conv)
+          quant_model.features[1].conv)
 
     print("Size of model after quantization")
-    print_size_of_model(myModel)
+    print_size_of_model(quant_model)
 
-    num_eval_batches = 1000
-    eval_batch_size = 50
+    quant_model_scripted = torch.jit.script(quant_model)
+    path_save = saved_model_dir + scripted_quantized_model_file
+    quant_model_scripted.save(path_save)
+    print('saved at ', path_save)
 
-    top1, top5 = evaluate(myModel, criterion, data_loader_test, neval_batches=num_eval_batches, dev='cpu')
-    print('Evaluation accuracy on %d images, %2.2f' % (num_eval_batches * eval_batch_size, top1.avg))
+def post_train_static_per_ch_quant():
+    saved_model_dir = '../data/'
+    float_model_file = 'mobilenet_v2-b0353104.pth'
+    scripted_quantized_model_file = 'mobilenet_v2_quant_per_ch_scripted.pth'
+
+    num_calibration_batches = 32
+    data_loader_train = prepare_data_loader_train()
 
     print('Per Channel Quantization')
-    per_channel_quantized_model = load_model(saved_model_dir + float_model_file)
-    per_channel_quantized_model.eval()
-    per_channel_quantized_model.fuse_model()
-    # The old 'fbgemm' is still available but 'x86' is the recommended default.
-    per_channel_quantized_model.qconfig = torch.ao.quantization.get_default_qconfig('x86')
-    print(per_channel_quantized_model.qconfig)
+    path_float_model = saved_model_dir + float_model_file
+    float_model = load_model(path_float_model)
+    float_model.eval()
+    float_model.fuse_model()
 
-    torch.ao.quantization.prepare(per_channel_quantized_model, inplace=True)
-    evaluate(per_channel_quantized_model, criterion, data_loader_train, num_calibration_batches, dev='cpu')
-    torch.ao.quantization.convert(per_channel_quantized_model, inplace=True)
-    top1, top5 = evaluate(per_channel_quantized_model, criterion, data_loader_test, neval_batches=num_eval_batches, dev='cpu')
-    print('Evaluation accuracy on %d images, %2.2f' % (num_eval_batches * eval_batch_size, top1.avg))
-    torch.jit.save(torch.jit.script(per_channel_quantized_model), saved_model_dir + scripted_quantized_model_file)
+    # The old 'fbgemm' is still available but 'x86' is the recommended default.
+    float_model.qconfig = torch.ao.quantization.get_default_qconfig('x86')
+    print('qconfig -------')
+    print(float_model.qconfig)
+    torch.ao.quantization.prepare(float_model, inplace=True)
+
+    print('\n Inverted Residual Block:After observer insertion \n\n', float_model.features[1].conv)
+
+    # Calibrate with the training set
+    print('start calibration')
+    evaluate(float_model, data_loader_train, num_calibration_batches, dev='cpu')
+    print('Per Channel Post Training Quantization: Calibration done')
+
+    # Convert to quantized model
+    per_channel_quanti_model = torch.ao.quantization.convert(float_model)
+    print('Per Channel Post Training Quantization: Convert done')
+    print('\n Inverted Residual Block: After fusion and quantization, note fused modules: \n\n',
+          per_channel_quanti_model.features[1].conv)
+
+    print("Size of model after quantization")
+    print_size_of_model(per_channel_quanti_model)
+
+    per_channel_quanti_model_scripted = torch.jit.script(per_channel_quanti_model)
+    path_save = saved_model_dir + scripted_quantized_model_file
+    per_channel_quanti_model_scripted.save(saved_model_dir + scripted_quantized_model_file)
+    print('saved at ', path_save)
 
 def quant_aware_train():
     saved_model_dir = '../data/'
     float_model_file = 'mobilenet_v2-b0353104.pth'
-    qat_model = load_model(saved_model_dir + float_model_file)
+    device = 'cpu'
+    num_train_batches = 20
+    num_eval_batches = 1000
+    eval_batch_size = 50
+
+    print('QAT')
+    path_float_model = saved_model_dir + float_model_file
+    qat_model = load_model(path_float_model)
     qat_model.fuse_model(is_qat=True)
 
     optimizer = torch.optim.SGD(qat_model.parameters(), lr=0.0001)
@@ -385,67 +313,92 @@ def quant_aware_train():
     print('Inverted Residual Block: After preparation for QAT, note fake-quantization modules \n',
           qat_model.features[1].conv)
 
-    device = 'cpu'
-
     data_loader = prepare_data_loader_train()
     data_loader_test = prepare_data_loader_test()
-
-    num_train_batches = 20
-    num_eval_batches = 1000
-    eval_batch_size = 50
 
     criterion = nn.CrossEntropyLoss()
     # QAT takes time and one needs to train over a few epochs.
     # Train and check accuracy after each epoch
+    # batch norm 과 quantization param을 초기에 프리즈하여
+    # weight가 더 잘 학습되도록 한다.
+
     for nepoch in range(8):
         train_one_epoch(qat_model, criterion, optimizer, data_loader, device, num_train_batches)
-        if nepoch > 3:
-            # Freeze quantizer parameters
-            qat_model.apply(torch.ao.quantization.disable_observer)
+
         if nepoch > 2:
             # Freeze batch norm mean and variance estimates
             qat_model.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
+
+        if nepoch > 3:
+            # Freeze quantizer parameters(scale and zero-point)
+            qat_model.apply(torch.ao.quantization.disable_observer)
 
         # Check the accuracy after each epoch
         quantized_model = torch.ao.quantization.convert(qat_model.eval(), inplace=False)
         quantized_model.eval()
         top1, top5 = evaluate(quantized_model, criterion, data_loader_test, neval_batches=num_eval_batches, dev=device)
-        print('\nEpoch %d :Evaluation accuracy on %d images, %2.2f' % (
-        nepoch, num_eval_batches * eval_batch_size, top1.avg))
+        print('\nEpoch %d :Evaluation accuracy on %d images, %2.2f %2.2f' % (
+        nepoch, num_eval_batches * eval_batch_size, top1.avg, top5.avg))
 
-    torch.jit.save(torch.jit.script(quantized_model), saved_model_dir + 'mobilenet_qat_scripted.pth')
+    quantized_model_scripted = torch.jit.script(quantized_model)
+    path_save = saved_model_dir + 'mobilenet_v2_qat_scripted.pth'
+    quantized_model_scripted.save(path_save)
 
-def check_scripted_quantized_model():
-    #path_model = '../data/mobilenet_quantization_scripted.pth' # top-1: 67.33
-    path_model = '../data/mobilenet_qat_scripted.pth'  #top-1: 67.01, top-5: 87.50
+def check_scripted_model_acc():
+    #path_model = '../data/mobilenet_v2_float_scripted.pth'
+    #path_model = '../data/mobilenet_v2_quant_scripted.pth'
+    #path_model = '../data/mobilenet_v2_quant_per_ch_scripted.pth'
+    path_model = '../data/mobilenet_v2_qat_scripted.pth'
+
+    if 'quant' in path_model or 'qat' in path_model:
+        device = 'cpu'
+    else:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     model_scripted = torch.jit.load(path_model)
-    model_scripted = model_scripted.to('cpu')
+    model_scripted = model_scripted.to(device)
     model_scripted = model_scripted.eval()
 
-    data_loader = prepare_data_loader_test()
-    dev = 'cpu'
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
-    cnt = 0
-    end = -1
-    with torch.no_grad():
-        for i, (image, target) in enumerate(data_loader):
-            image, target = image.to(dev), target.to(dev)
-            output = model_scripted(image)
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+    num_eval_batches = 100 # 1000
+    eval_batch_size = 50
+    data_loader = prepare_data_loader_test(eval_batch_size)
 
-            top1.update(acc1[0], image.size(0))
-            top5.update(acc5[0], image.size(0))
+    top1, top5 = evaluate(model_scripted, data_loader, num_eval_batches, dev=device)
+    print('Evaluation accuracy on %d images, top-1: %2.2f top-5: %2.2f' % (num_eval_batches * eval_batch_size, top1.avg, top5.avg))
+    # mobilenet_v2_float_scripted.pth
+    # Evaluation accuracy on 5000 images, top-1: 78.46 top-5: 93.44
 
-            cnt += 1
-            if end != -1 and cnt >= end:
-                break
+    # mobilenet_v2_quant_scripted.pth
+    # Evaluation accuracy on 5000 images, top-1: 65.00 top-5: 86.72
 
-    print(f'\nEvaluation accuracy top-1: {top1.avg:.2f}, top-5: {top5.avg:.2f}')
+    # mobilenet_v2_quant_per_ch_scripted.pth
+    # Evaluation accuracy on 5000 images, top-1: 75.54 top-5: 92.10
+
+    # mobilenet_v2_qat_scripted.pth
+    # Evaluation accuracy on 5000 images, top-1: 74.38 top-5: 91.78
+
+def print_model():
+    #path_model = '../data/mobilenet_v2_quant_scripted.pth'
+    #path_model = '../data/mobilenet_v2_quant_per_ch_scripted.pth'
+    path_model = '../data/mobilenet_v2_qat_scripted.pth'
+
+    if 'quant' in path_model or 'qat' in path_model:
+        device = 'cpu'
+    else:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    model_scripted = torch.jit.load(path_model)
+    model_scripted = model_scripted.to(device)
+    model_scripted = model_scripted.eval()
+
+    print(model_scripted)
 
 if __name__ == '__main__':
     #baseline()
     #post_train_static_quant()
-    check_scripted_quantized_model()
+    #post_train_static_per_ch_quant()
     #quant_aware_train()
+
+    #check_scripted_model_acc()
+    print_model()
+
