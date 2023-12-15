@@ -209,6 +209,41 @@ def baseline():
     script_model = torch.jit.script(float_model)
     script_model.save(saved_model_dir + scripted_float_model_file)
 
+def optimized_for_mobile(trace=False):
+    # https://pytorch.org/tutorials/recipes/script_optimized.html
+    saved_model_dir = '../data/'
+    float_model_file = 'mobilenet_v2-b0353104.pth'
+    if trace:
+        scripted_float_model_file = 'mobilenet_v2_opt_trace_float_scripted.pth'
+    else:
+        scripted_float_model_file = 'mobilenet_v2_opt_float_scripted.pth'
+
+    dev = 'cpu'
+
+    float_model = load_model(saved_model_dir + float_model_file).to(dev)
+    float_model.eval()
+    #float_model.fuse_model()
+
+    if trace:
+        script_model = torch.jit.trace(float_model, example_inputs=torch.randn((1,3,224,224)))
+    else:
+        script_model = torch.jit.script(float_model)
+
+    from torch.utils.mobile_optimizer import optimize_for_mobile
+
+    opt_script_model = optimize_for_mobile(script_model)
+
+    opt_script_model.save(saved_model_dir + scripted_float_model_file)
+
+def cvt_optimized():
+    path_load = '../data/mobilenet_v2_quant_per_ch_scripted.pth'
+    path_save = '../data/mobilenet_v2_opt_quant_per_ch_scripted.pth'
+    model = torch.jit.load(path_load)
+    from torch.utils.mobile_optimizer import optimize_for_mobile
+    model_opt = optimize_for_mobile(model)
+    model_opt.save(path_save)
+
+
 def post_train_static_quant():
     saved_model_dir = '../data/'
     float_model_file = 'mobilenet_v2-b0353104.pth'
@@ -393,12 +428,52 @@ def print_model():
 
     print(model_scripted)
 
+def check_w():
+    saved_model_dir = '../data/'
+    float_model_file = 'mobilenet_v2-b0353104.pth'
+
+    print('QAT')
+    path_float_model = saved_model_dir + float_model_file
+    qat_model = load_model(path_float_model)
+    qat_model.fuse_model(is_qat=True)
+
+    # The old 'fbgemm' is still available but 'x86' is the recommended default.
+    qat_model.qconfig = torch.ao.quantization.get_default_qat_qconfig('x86')
+
+    torch.ao.quantization.prepare_qat(qat_model, inplace=True)
+
+    for i in range(2):
+        with torch.no_grad():
+            image = torch.randn((50,3,224,224))
+            qat_model(image)
+
+    # Check the accuracy after each epoch
+    quantized_model = torch.ao.quantization.convert(qat_model.eval(), inplace=False)
+    quantized_model.eval()
+
+    print(quantized_model)
+
+    for n, m in quantized_model.named_modules():
+        print(n, type(m))
+
+        if isinstance(m, torch.ao.nn.quantized.modules.conv.Conv2d):
+             print(m.weight)
+
+        if isinstance(m, torch.ao.nn.intrinsic.quantized.modules.conv_relu.ConvReLU2d):
+             print(m.weight)
+
+    for n, p in quantized_model.named_parameters():
+        print(n, p.shape)
+
 if __name__ == '__main__':
     #baseline()
+    #optimized_for_mobile(True)
     #post_train_static_quant()
     #post_train_static_per_ch_quant()
     #quant_aware_train()
 
     #check_scripted_model_acc()
-    print_model()
+    #print_model()
+    #check_w()
+    cvt_optimized()
 
