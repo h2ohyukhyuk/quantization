@@ -11,6 +11,8 @@ import torchvision.transforms as transforms
 
 from example.utils import _make_divisible, ConvBNReLU, InvertedResidual
 from example.utils import print_size_of_model, evaluate, train_one_epoch
+from torch.utils.mobile_optimizer import optimize_for_mobile
+from onnxruntime.quantization import QuantFormat, QuantType, quantize_static
 
 # Set up warnings
 import warnings
@@ -229,8 +231,6 @@ def optimized_for_mobile(trace=False):
     else:
         script_model = torch.jit.script(float_model)
 
-    from torch.utils.mobile_optimizer import optimize_for_mobile
-
     opt_script_model = optimize_for_mobile(script_model)
 
     opt_script_model.save(saved_model_dir + scripted_float_model_file)
@@ -242,6 +242,69 @@ def cvt_optimized():
     from torch.utils.mobile_optimizer import optimize_for_mobile
     model_opt = optimize_for_mobile(model)
     model_opt.save(path_save)
+
+def exp_jit_onnx():
+    # ----------------------------------------
+    path_load = '../data/mobilenet_v2_opt_quant_per_ch_scripted.pth'
+    path_save = '../data/mobilenet_v2_opt_quant_per_ch_scripted.onnx'
+    model = torch.jit.load(path_load)
+    torch_input = torch.randn(1, 1, 224, 224)
+
+    # onnx_program = torch.onnx.dynamo_export(model, torch_input)
+    # onnx_program.save(path_save)
+
+    torch.onnx.export(model, torch_input, path_save, export_params=True, opset_version=10,
+                      do_constant_folding=True, input_names=['input'], output_names=['output'])
+    # dynamic_axes = {'input': {0: 'batch_size'},  # 가변적인 길이를 가진 차원
+    #                 'output': {0: 'batch_size'}})
+
+def exp_onnx():
+
+    # ----------------------------------------
+    saved_model_dir = '../data/'
+    float_model_file = 'mobilenet_v2-b0353104.pth'
+    onnx_quantized_model_file = 'mobilenet_v2_quant_per_ch.onnx'
+
+    num_calibration_batches = 32
+    data_loader_train = prepare_data_loader_train()
+
+    print('Per Channel Quantization')
+    path_float_model = saved_model_dir + float_model_file
+    float_model = load_model(path_float_model)
+    float_model.eval()
+    float_model.fuse_model()
+
+    # The old 'fbgemm' is still available but 'x86' is the recommended default.
+    float_model.qconfig = torch.ao.quantization.get_default_qconfig('x86')
+    print('qconfig -------')
+    print(float_model.qconfig)
+    torch.ao.quantization.prepare(float_model, inplace=True)
+
+    print('\n Inverted Residual Block:After observer insertion \n\n', float_model.features[1].conv)
+
+    # Calibrate with the training set
+    print('start calibration')
+    evaluate(float_model, data_loader_train, num_calibration_batches, dev='cpu')
+    print('Per Channel Post Training Quantization: Calibration done')
+
+    # Convert to quantized model
+    per_channel_quanti_model = torch.ao.quantization.convert(float_model)
+    print('Per Channel Post Training Quantization: Convert done')
+    print('\n Inverted Residual Block: After fusion and quantization, note fused modules: \n\n',
+          per_channel_quanti_model.features[1].conv)
+
+    print("Size of model after quantization")
+    print_size_of_model(per_channel_quanti_model)
+
+    path_save = saved_model_dir + onnx_quantized_model_file
+    torch_input = torch.randn(1, 3, 224, 224)
+    # onnx_program = torch.onnx.dynamo_export(per_channel_quanti_model, torch_input)
+    # onnx_program.save(path_save)
+
+    torch.onnx.export(per_channel_quanti_model, torch_input, path_save, export_params=True, opset_version=13,
+                      do_constant_folding=True, input_names=['input'], output_names=['output'])
+
+    print('saved at ', path_save)
 
 
 def post_train_static_quant():
@@ -475,5 +538,7 @@ if __name__ == '__main__':
     #check_scripted_model_acc()
     #print_model()
     #check_w()
-    cvt_optimized()
+    #cvt_optimized()
+    #exp_jit_onnx()
+    exp_onnx()
 
