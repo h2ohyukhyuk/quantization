@@ -263,17 +263,34 @@ def exp_onnx():
     # ----------------------------------------
     saved_model_dir = '../data/'
     float_model_file = 'mobilenet_v2-b0353104.pth'
+    onnx_fp32_model_file = 'mobilenet_v2_fp32.onnx'
+    onnx_fp16_model_file = 'mobilenet_v2_fp16.onnx'
     onnx_quantized_model_file = 'mobilenet_v2_quant_per_ch.onnx'
 
     num_calibration_batches = 32
     data_loader_train = prepare_data_loader_train()
 
-    print('Per Channel Quantization')
     path_float_model = saved_model_dir + float_model_file
     float_model = load_model(path_float_model)
     float_model.eval()
     float_model.fuse_model()
 
+    torch_input = torch.randn(1, 3, 224, 224)
+    path_save = saved_model_dir + onnx_fp32_model_file
+    torch.onnx.export(float_model, torch_input, path_save, export_params=True, opset_version=13,
+                      do_constant_folding=True, input_names=['input'], output_names=['output'])
+    print('onnx fp32 model saved at ', path_save)
+
+    # fp16_model = float_model.half()
+    # fp16_torch_input = torch_input.half()
+
+    # path_save = saved_model_dir + onnx_fp16_model_file
+    # torch.onnx.export(fp16_model, fp16_torch_input, path_save, export_params=True, opset_version=13,
+    #                   do_constant_folding=True, input_names=['input'], output_names=['output'])
+    # print('onnx fp16 model saved at ', path_save)
+
+
+    print('Per Channel Quantization')
     # The old 'fbgemm' is still available but 'x86' is the recommended default.
     float_model.qconfig = torch.ao.quantization.get_default_qconfig('x86')
     print('qconfig -------')
@@ -297,14 +314,14 @@ def exp_onnx():
     print_size_of_model(per_channel_quanti_model)
 
     path_save = saved_model_dir + onnx_quantized_model_file
-    torch_input = torch.randn(1, 3, 224, 224)
+
     # onnx_program = torch.onnx.dynamo_export(per_channel_quanti_model, torch_input)
     # onnx_program.save(path_save)
 
     torch.onnx.export(per_channel_quanti_model, torch_input, path_save, export_params=True, opset_version=13,
                       do_constant_folding=True, input_names=['input'], output_names=['output'])
 
-    print('saved at ', path_save)
+    print('onnx quantized model saved at ', path_save)
 
 
 def post_train_static_quant():
